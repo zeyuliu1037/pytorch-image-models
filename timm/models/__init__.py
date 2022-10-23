@@ -53,6 +53,8 @@ from .swin_transformer_v2_cr import *
 from .tnt import *
 from .tresnet import *
 from .twins import *
+from .vit_spike import twins_pcpvt_small_spike
+from .vit_spike_atts import twins_pcpvt_small_spike_v2
 from .vgg import *
 from .visformer import *
 from .vision_transformer import *

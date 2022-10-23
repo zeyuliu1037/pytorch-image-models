@@ -42,3 +42,4 @@ from .std_conv import StdConv2d, StdConv2dSame, ScaledStdConv2d, ScaledStdConv2d
 from .test_time_pool import TestTimePoolHead, apply_test_time_pool
 from .trace_utils import _assert, _float_to_int
 from .weight_init import trunc_normal_, trunc_normal_tf_, variance_scaling_, lecun_normal_
+from .spike_layer import HoyerBiAct
