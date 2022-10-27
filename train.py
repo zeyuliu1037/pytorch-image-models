@@ -144,8 +144,8 @@ group.add_argument('--grad-checkpointing', action='store_true', default=False,
 
 # Optimizer parameters
 group = parser.add_argument_group('Optimizer parameters')
-group.add_argument('--opt', default='sgd', type=str, metavar='OPTIMIZER',
-                    help='Optimizer (default: "sgd"')
+group.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
+                    help='Optimizer (default: "adamw"')
 group.add_argument('--opt-eps', default=None, type=float, metavar='EPSILON',
                     help='Optimizer Epsilon (default: None, use opt default)')
 group.add_argument('--opt-betas', default=None, type=float, nargs='+', metavar='BETA',
