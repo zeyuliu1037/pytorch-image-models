@@ -54,7 +54,9 @@ from .tnt import *
 from .tresnet import *
 from .twins import *
 from .vit_spike import twins_pcpvt_small_spike
-from .vit_spike_atts import twins_pcpvt_small_spike_v2
+from .vit_spike_q import twins_pcpvt_small_spike_q
+from .vit_spike_k import twins_pcpvt_small_spike_k
+from .vit_spike_v import twins_pcpvt_small_spike_v
 from .vgg import *
 from .visformer import *
 from .vision_transformer import *
