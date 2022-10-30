@@ -525,7 +525,7 @@ def _create_twins(variant, pretrained=False, **kwargs):
 
 
 @register_model
-def twins_pcpvt_small_spike_v(pretrained=False, **kwargs):
+def twins_pcpvt_small_spike_q(pretrained=False, **kwargs):
     model_kwargs = dict(
         patch_size=4, embed_dims=[64, 128, 320, 512], num_heads=[1, 2, 5, 8], mlp_ratios=[8, 8, 4, 4],
         depths=[3, 4, 6, 3], sr_ratios=[8, 4, 2, 1], **kwargs)
