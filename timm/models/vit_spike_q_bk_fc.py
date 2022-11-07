@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from functools import partial
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
-from .layers import Mlp_conv_spike, DropPath, to_2tuple, trunc_normal_, HoyerBiAct, HoyerBiAct1d
+from .layers import MlP_spike, DropPath, to_2tuple, trunc_normal_, HoyerBiAct
 from .fx_features import register_notrace_module
 from .registry import register_model
 # from .vision_transformer import Attention # implement spike-attention here
@@ -77,19 +77,18 @@ class LocallyGroupedAttn(nn.Module):
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
 
-        # self.qkv = nn.Linear(dim, dim * 3, bias=True)
+        self.qkv = nn.Linear(dim, dim * 3, bias=True)
 
-        self.norm = nn.BatchNorm1d(dim)
-        self.act = HoyerBiAct1d(num_features=dim, spike_type='cw')
+        self.norm = nn.BatchNorm2d(self.num_heads)
+        self.act = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
         
-
-        self.norm_k = nn.BatchNorm1d(dim)
-        self.act_k = HoyerBiAct1d(num_features=dim, spike_type='cw')
-        self.norm_v = nn.BatchNorm1d(dim)
-        self.act_v = HoyerBiAct1d(num_features=dim, spike_type='cw')
+        self.norm_k = nn.BatchNorm2d(self.num_heads)
+        self.act_k = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
+        self.norm_v = nn.BatchNorm2d(self.num_heads)
+        self.act_v = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
         
-        self.norm_qkv = nn.BatchNorm1d(self.num_heads)
-        self.act_qkv = HoyerBiAct1d(num_features=self.num_heads, spike_type='cw')
+        self.norm_qkv = nn.BatchNorm2d(self.num_heads)
+        self.act_qkv = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
 
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -102,13 +101,12 @@ class LocallyGroupedAttn(nn.Module):
         # the masking implementation is more reasonable and accurate.
         B, N, C = x.shape
 
+        x = x.reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        x = self.act(self.norm(x))
+        x = x.permute(0, 2, 1, 3).reshape(B, N, C)
+
         H, W = size
         x = x.view(B, H, W, C)
-
-        x = x.permute(0, 3, 1, 2)
-        x = self.act(self.norm(x))
-        x = x.permute(0, 2, 3, 1)
-
         pad_l = pad_t = 0
         pad_r = (self.ws - W % self.ws) % self.ws
         pad_b = (self.ws - H % self.ws) % self.ws
@@ -120,14 +118,11 @@ class LocallyGroupedAttn(nn.Module):
             B, _h * _w, self.ws * self.ws, 3, self.num_heads, C // self.num_heads).permute(3, 0, 1, 4, 2, 5)
         q, k, v = qkv[0], qkv[1], qkv[2] # B, _h*_w, num_heads, ws*ws, C // self.num_heads
         # not sure if this is necessary
-        k, v = k.permute(0, 2, 4, 1, 3), v.permute(0, 2, 4, 1, 3)
-        k, v = k.reshape(B, C, _h*_w * self.ws * self.ws).contiguous(), \
-                v.reshape(B, C, _h*_w * self.ws * self.ws).contiguous()
+        k, v = k.reshape(B*_h*_w, self.num_heads, self.ws*self.ws, C//self.num_heads), \
+                v.reshape(B*_h*_w, self.num_heads, self.ws*self.ws, C//self.num_heads)
         k, v = self.act_k(self.norm_k(k)), self.act_v(self.norm_v(v))
-        k, v = k.reshape(B, self.num_heads, C // self.num_heads, _h*_w, self.ws * self.ws), \
-                v.reshape(B, self.num_heads, C // self.num_heads, _h*_w, self.ws * self.ws)
-        k, v = k.permute(0, 3, 1, 4, 2).contiguous(), v.permute(0, 3, 1, 4, 2).contiguous()
-
+        k, v = k.reshape(B, _h*_w, self.num_heads, self.ws*self.ws, C//self.num_heads), \
+                v.reshape(B, _h*_w, self.num_heads, self.ws*self.ws, C//self.num_heads)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = self.attn_drop(attn)
@@ -136,6 +131,7 @@ class LocallyGroupedAttn(nn.Module):
         if pad_r > 0 or pad_b > 0:
             x = x[:, :H, :W, :].contiguous()
         x = x.reshape(B, N, C).transpose(2, 1)
+        x.reshape(B, self.num_heads, C//self.num_heads, N)
         x = self.act_qkv(self.norm_qkv(x))
         x = x.reshape(B, C, N).transpose(2, 1)
 
@@ -195,16 +191,16 @@ class GlobalSubSampleAttn(nn.Module):
         self.q = nn.Linear(dim, dim, bias=True)
         self.kv = nn.Linear(dim, dim * 2, bias=True)
 
-        self.norm = nn.BatchNorm1d(dim)
-        self.act = HoyerBiAct1d(num_features=dim, spike_type='cw')
-
-        self.norm_k = nn.BatchNorm1d(dim)
-        self.act_k = HoyerBiAct1d(num_features=dim, spike_type='cw')
-        self.norm_v = nn.BatchNorm1d(dim)
-        self.act_v = HoyerBiAct1d(num_features=dim, spike_type='cw')
+        self.norm = nn.BatchNorm2d(self.num_heads)
+        self.act = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
+       
+        self.norm_k = nn.BatchNorm2d(self.num_heads)
+        self.act_k = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
+        self.norm_v = nn.BatchNorm2d(self.num_heads)
+        self.act_v = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
         
-        self.norm_qkv = nn.BatchNorm1d(dim)
-        self.act_qkv = HoyerBiAct1d(num_features=dim, spike_type='cw')
+        self.norm_qkv = nn.BatchNorm2d(self.num_heads)
+        self.act_qkv = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
         
 
         self.attn_drop = nn.Dropout(attn_drop)
@@ -223,9 +219,9 @@ class GlobalSubSampleAttn(nn.Module):
 
     def forward(self, x, size: Size_):
         B, N, C = x.shape
-        x = x.permute(0, 2, 1)
+        x = x.reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         x = self.act(self.norm(x))
-        x = x.permute(0, 2, 1)
+        x = x.permute(0, 2, 1, 3).reshape(B, N, C)
 
         q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
@@ -239,19 +235,16 @@ class GlobalSubSampleAttn(nn.Module):
 
         kv = self.kv(x).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         k, v = kv[0], kv[1] # B, self.num_heads, -1, C // self.num_heads
-        k, v = k.permute(0, 1, 3, 2).reshape(B, C, -1).contiguous(), v.permute(0, 1, 3, 2).reshape(B, C, -1).contiguous()
         k, v = self.act_k(self.norm_k(k)), self.act_v(self.norm_v(v))
-        k, v = k.reshape(B, self.num_heads, C // self.num_heads, -1).permute(0, 1, 3, 2).contiguous(),\
-             v.reshape(B, self.num_heads, C // self.num_heads, -1).permute(0, 1, 3, 2).contiguous()
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
 
         attn = self.attn_drop(attn)
 
         x = (attn @ v)
-        x = x.permute(0, 1, 3, 2).reshape(B, C, N).contiguous()
+        assert x.shape == (B, self.num_heads, N, C // self.num_heads)
         x = self.act_qkv(self.norm_qkv(x))
-        x = x.transpose(1, 2).contiguous()
+        x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
        
         x = self.proj_drop(x)
@@ -269,19 +262,16 @@ class Attention(nn.Module):
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
 
-        self.norm = nn.BatchNorm1d(dim)
-        self.act = HoyerBiAct1d(num_features=dim, spike_type='cw')
+        self.norm = nn.BatchNorm2d(self.num_heads)
+        self.act = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
 
-        self.norm_k = nn.BatchNorm1d(dim)
-        self.act_k = HoyerBiAct1d(num_features=dim, spike_type='cw')
-        self.norm_v = nn.BatchNorm1d(dim)
-        self.act_v = HoyerBiAct1d(num_features=dim, spike_type='cw')
+        self.norm_k = nn.BatchNorm2d(self.num_heads)
+        self.act_k = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
+        self.norm_v = nn.BatchNorm2d(self.num_heads)
+        self.act_v = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
         
-        self.norm_qkv = nn.BatchNorm1d(dim)
-        self.act_qkv = HoyerBiAct1d(num_features=dim, spike_type='cw')
-        
-        self.norm_qkv = nn.BatchNorm1d(dim)
-        self.act_qkv = HoyerBiAct1d(num_features=dim, spike_type='cw')
+        self.norm_qkv = nn.BatchNorm2d(self.num_heads)
+        self.act_qkv = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
 
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -289,24 +279,23 @@ class Attention(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        x = x.permute(0, 2, 1)
+        x = x.reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         x = self.act(self.norm(x))
-        x = x.permute(0, 2, 1)
+        x = x.permute(0, 2, 1, 3).reshape(B, N, C)
 
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple) [B, num_heads, N, C//num_heads]
         # bn + spike for all q, k, v
         # q, k, v = self.actq(self.normq(q)), self.actk(self.normk(k)), self.actv(self.normv(v))
-        k, v = k.permute(0, 1, 3, 2).reshape(B, C, N).contiguous(), v.permute(0, 1, 3, 2).reshape(B, C, N).contiguous()
         k, v = self.act_k(self.norm_k(k)), self.act_v(self.norm_v(v))
         attn = (q @ k.transpose(-2, -1)) * self.scale
         # attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
         x = (attn @ v)
-        x = x.permute(0, 1, 3, 2).reshape(B, C, N).contiguous()
+        assert x.shape == (B, self.num_heads, N, C // self.num_heads)
         x = self.act_qkv(self.norm_qkv(x))
-        x = x.transpose(1, 2).contiguous()
+        x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
 
@@ -332,7 +321,7 @@ class Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         # self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp_conv_spike(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = MlP_spike(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x, size: Size_):
         # x = x + self.drop_path(self.attn(self.norm1(x), size))

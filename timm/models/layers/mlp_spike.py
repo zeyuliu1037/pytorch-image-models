@@ -5,7 +5,7 @@ Hacked together by / Copyright 2020 Ross Wightman
 from torch import nn as nn
 
 from .helpers import to_2tuple
-from .spike_layer import HoyerBiAct
+from .spike_layer import HoyerBiAct, HoyerBiAct1d
 
 
 class Mlp_spike(nn.Module):
@@ -32,6 +32,30 @@ class Mlp_spike(nn.Module):
         x = self.drop2(x)
         return x
 
+class Mlp_conv_spike(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., act_layer=None, bias=True):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1_conv = nn.Conv1d(in_features, hidden_features, kernel_size=1, stride=1)
+        self.fc1_bn = nn.BatchNorm1d(hidden_features)
+        self.fc1_act = HoyerBiAct1d(num_features=hidden_features, spike_type='cw')
+
+        self.fc2_conv = nn.Conv1d(hidden_features, out_features, kernel_size=1, stride=1)
+        # self.fc2_bn = nn.BatchNorm1d(out_features)
+        # self.fc2_act = HoyerBiAct1d(num_features=out_features, spike_type='cw')
+
+        self.c_hidden = hidden_features
+        self.c_output = out_features
+    def forward(self, x):
+        B, N, C = x.shape
+        x = x.permute(0, 2, 1).contiguous()
+        x = self.fc1_act(self.fc1_bn(self.fc1_conv(x)))
+        x = self.fc2_conv(x)
+        x = x.permute(0, 2, 1).contiguous()
+        # x = self.fc2_act(self.fc2_bn(self.fc2_conv(x)))
+
+        return x
 
 class GluMlp(nn.Module):
     """ MLP w/ GLU style gating

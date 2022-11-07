@@ -55,8 +55,11 @@ from .tresnet import *
 from .twins import *
 from .vit_spike import twins_pcpvt_small_spike
 from .vit_spike_q import twins_pcpvt_small_spike_q
+from .vit_spike_mlp import twins_pcpvt_small_spike_mlp
 # from .vit_spike_k import twins_pcpvt_small_spike_k
 from .vit_spike_v import twins_pcpvt_small_spike_v
+from .vit_ori_spike_q import vit_small_patch16_224_sipke_q
+from .vit_spike_iclr import vit_snn
 from .vgg import *
 from .visformer import *
 from .vision_transformer import *

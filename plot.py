@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-filename = "output/train/20221029-133319-twins_pcpvt_small_spike_v-224/summary.csv"
+filename = "output/train/20221029-054607-twins_pcpvt_small_spike_q-224/summary.csv"
 save_fig_name = filename[:-4] + '.png'
 data = np.loadtxt(open(filename, "rb"),delimiter=",",skiprows=1)
 

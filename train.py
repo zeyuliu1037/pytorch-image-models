@@ -38,6 +38,7 @@ from timm.models import create_model, safe_model_name, resume_checkpoint, load_c
 from timm.optim import create_optimizer_v2, optimizer_kwargs
 from timm.scheduler import create_scheduler_v2, scheduler_kwargs
 from timm.utils import ApexScaler, NativeScaler
+from torchsummary import summary
 
 try:
     from apex import amp
@@ -425,6 +426,8 @@ def main():
         scriptable=args.torchscript,
         checkpoint_path=args.initial_checkpoint,
     )
+    # summary(model, (3, 224, 224), depth=6)
+    # exit()
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly

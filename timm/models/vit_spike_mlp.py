@@ -24,7 +24,7 @@ from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from .layers import Mlp_spike, DropPath, to_2tuple, trunc_normal_, HoyerBiAct
 from .fx_features import register_notrace_module
 from .registry import register_model
-# from .vision_transformer import Attention # implement spike-attention here
+from .vision_transformer import Attention
 from .helpers import build_model_with_cfg
 
 
@@ -40,7 +40,7 @@ def _cfg(url='', **kwargs):
 
 
 default_cfgs = {
-    'twins_pcpvt_small_spike': _cfg(
+    'twins_pcpvt_small': _cfg(
         url='https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vt3p-weights/twins_pcpvt_small-e70e7e7a.pth',
         ),
     'twins_pcpvt_base': _cfg(
@@ -78,18 +78,8 @@ class LocallyGroupedAttn(nn.Module):
         self.scale = head_dim ** -0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
-
-        self.normk = nn.BatchNorm2d(self.num_heads)
-        self.actk = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-        self.normv = nn.BatchNorm2d(self.num_heads)
-        self.actv = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-        self.norm_qkv = nn.BatchNorm2d(self.num_heads)
-        self.act_qkv = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.norm = nn.BatchNorm2d(self.num_heads)
-        self.act = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
         self.proj_drop = nn.Dropout(proj_drop)
         self.ws = ws
 
@@ -110,29 +100,15 @@ class LocallyGroupedAttn(nn.Module):
         qkv = self.qkv(x).reshape(
             B, _h * _w, self.ws * self.ws, 3, self.num_heads, C // self.num_heads).permute(3, 0, 1, 4, 2, 5)
         q, k, v = qkv[0], qkv[1], qkv[2]
-        # not sure if this is necessary
-        k, v = k.reshape(B*_h*_w, self.num_heads, self.ws*self.ws, C//self.num_heads), \
-                v.reshape(B*_h*_w, self.num_heads, self.ws*self.ws, C//self.num_heads)
-        k, v = self.actk(self.normk(k)), self.actv(self.normv(v))
-        k, v = k.reshape(B, _h*_w, self.num_heads, self.ws*self.ws, C//self.num_heads), \
-                v.reshape(B, _h*_w, self.num_heads, self.ws*self.ws, C//self.num_heads)
-
-        attn = (q @ k.transpose(-2, -1))
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
         attn = (attn @ v).transpose(2, 3).reshape(B, _h, _w, self.ws, self.ws, C)
         x = attn.transpose(2, 3).reshape(B, _h * self.ws, _w * self.ws, C)
         if pad_r > 0 or pad_b > 0:
             x = x[:, :H, :W, :].contiguous()
-        x = x.reshape(B, N, C).transpose(2, 1)
-        x.reshape(B, self.num_heads, C//self.num_heads, N)
-        x = self.act_qkv(self.norm_qkv(x))
-        x = x.reshape(B, C, N).transpose(2, 1)
-
+        x = x.reshape(B, N, C)
         x = self.proj(x)
-        # if it is right? or should trasnpose(1,2) first?
-        x = x.transpose(2, 1).reshape(B, self.num_heads, C // self.num_heads, N)
-        x = self.act(self.norm(x))
-        x = x.reshape(B, C, N).transpose(2, 1)
         x = self.proj_drop(x)
         return x
 
@@ -184,32 +160,19 @@ class GlobalSubSampleAttn(nn.Module):
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
 
-
         self.q = nn.Linear(dim, dim, bias=True)
         self.kv = nn.Linear(dim, dim * 2, bias=True)
-
-        self.normk = nn.BatchNorm2d(self.num_heads)
-        self.actk = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-        self.normv = nn.BatchNorm2d(self.num_heads)
-        self.actv = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-        self.norm_qkv = nn.BatchNorm2d(self.num_heads)
-        self.act_qkv = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-        
-
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.norm = nn.BatchNorm2d(self.num_heads)
-        self.act = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
         self.proj_drop = nn.Dropout(proj_drop)
 
         self.sr_ratio = sr_ratio
         if sr_ratio > 1:
             self.sr = nn.Conv2d(dim, dim, kernel_size=sr_ratio, stride=sr_ratio)
-            self.normsr = nn.BatchNorm2d(dim)
-            self.actsr = HoyerBiAct(num_features=dim, spike_type='cw')
+            self.norm = nn.LayerNorm(dim)
         else:
             self.sr = None
-            self.normsr = None
+            self.norm = None
 
     def forward(self, x, size: Size_):
         B, N, C = x.shape
@@ -217,80 +180,20 @@ class GlobalSubSampleAttn(nn.Module):
 
         if self.sr is not None:
             x = x.permute(0, 2, 1).reshape(B, C, *size)
-            # x = self.sr(x).reshape(B, C, -1).permute(0, 2, 1)
-            x = self.sr(x)
-            x = self.normsr(x)
-            x = self.actsr(x)
-            x = x.reshape(B, C, -1).permute(0, 2, 1)
-
+            x = self.sr(x).reshape(B, C, -1).permute(0, 2, 1)
+            x = self.norm(x)
         kv = self.kv(x).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         k, v = kv[0], kv[1]
-        k, v = self.actk(self.normk(k)), self.actv(self.normv(v))
 
-        attn = (q @ k.transpose(-2, -1))
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).reshape(B, C, N)
-        x = x.reshape(B, self.num_heads, C // self.num_heads, N)
-        x = self.act_qkv(self.norm_qkv(x))
-        x = x.reshape(B, C, N).transpose(1, 2)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
-        # if it is right? or should trasnpose(1,2) first?
-        x = x.transpose(2, 1).reshape(B, self.num_heads, C // self.num_heads, N)
-        x = self.act(self.norm(x))
-        x = x.reshape(B, C, N).transpose(2, 1)
         x = self.proj_drop(x)
 
         return x
-
-
-class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
-        super().__init__()
-        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-
-        self.normk = nn.BatchNorm2d(self.num_heads)
-        self.actk = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-        self.normv = nn.BatchNorm2d(self.num_heads)
-        self.actv = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-        self.norm_qkv = nn.BatchNorm2d(self.num_heads)
-        self.act_qkv = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.norm = nn.BatchNorm2d(self.num_heads)
-        self.act = HoyerBiAct(num_features=self.num_heads, spike_type='cw')
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple) [B, num_heads, N, C//num_heads]
-        # bn + spike for all q, k, v
-        # q, k, v = self.actq(self.normq(q)), self.actk(self.normk(k)), self.actv(self.normv(v))
-        k, v = self.actk(self.normk(k)), self.actv(self.normv(v))
-        attn = (q @ k.transpose(-2, -1))
-        # attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).reshape(B, C, N)
-        x = x.reshape(B, self.num_heads, C // self.num_heads, N)
-        x = self.act_qkv(self.norm_qkv(x))
-        x = x.reshape(B, C, N).transpose(1, 2)
-        x = self.proj(x)
-        # if it is right? or should trasnpose(1,2) first?
-        x = x.transpose(2, 1).reshape(B, self.num_heads, C // self.num_heads, N)
-        x = self.act(self.norm(x))
-        x = x.reshape(B, C, N).transpose(2, 1)
-        x = self.proj_drop(x)
-
-        return x
-
 
 
 class Block(nn.Module):
@@ -323,18 +226,13 @@ class PosConv(nn.Module):
         super(PosConv, self).__init__()
         self.proj = nn.Sequential(nn.Conv2d(in_chans, embed_dim, 3, stride, 1, bias=True, groups=embed_dim), )
         self.stride = stride
-        self.norm = nn.BatchNorm2d(embed_dim)
-        self.act = HoyerBiAct(num_features=embed_dim, spike_type='cw')
 
     def forward(self, x, size: Size_):
         B, N, C = x.shape
         cnn_feat_token = x.transpose(1, 2).view(B, C, *size)
         x = self.proj(cnn_feat_token)
-        # add bn and spike
-        x = self.norm(x)
-        x = self.act(x)
         if self.stride == 1:
-            x += cnn_feat_token # how to deal with then spike add spike, just add or & ?
+            x += cnn_feat_token
         x = x.flatten(2).transpose(1, 2)
         return x
 
@@ -358,23 +256,19 @@ class PatchEmbed(nn.Module):
         self.H, self.W = img_size[0] // patch_size[0], img_size[1] // patch_size[1]
         self.num_patches = self.H * self.W
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.norm = nn.BatchNorm2d(embed_dim)
-        self.act  = HoyerBiAct(num_features=embed_dim, spike_type='cw')
+        self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x) -> Tuple[torch.Tensor, Size_]:
         B, C, H, W = x.shape
-        
-        # x = self.proj(x).flatten(2).transpose(1, 2)
-        x = self.proj(x)
+
+        x = self.proj(x).flatten(2).transpose(1, 2)
         x = self.norm(x)
-        x = self.act(x)
-        x = x.flatten(2).transpose(1, 2)
         out_size = (H // self.patch_size[0], W // self.patch_size[1])
 
         return x, out_size
 
 
-class Twins_Spike(nn.Module):
+class Twins(nn.Module):
     """ Twins Vision Transfomer (Revisiting Spatial Attention)
 
     Adapted from PVT (PyramidVisionTransformer) class at https://github.com/whai362/PVT.git
@@ -418,6 +312,7 @@ class Twins_Spike(nn.Module):
 
         self.norm = norm_layer(self.num_features)
 
+        self.act_head  = HoyerBiAct(num_features=1, spike_type='sum')
         # classification head
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
@@ -479,7 +374,7 @@ class Twins_Spike(nn.Module):
                 zip(self.patch_embeds, self.pos_drops, self.blocks, self.pos_block)):
             x, size = embed(x)
             x = drop(x)
-            for j, blk in enumerate(blocks): # block_cls * depth
+            for j, blk in enumerate(blocks):
                 x = blk(x, size)
                 if j == 0:
                     x = pos_blk(x, size)  # PEG here
@@ -491,7 +386,7 @@ class Twins_Spike(nn.Module):
     def forward_head(self, x, pre_logits: bool = False):
         if self.global_pool == 'avg':
             x = x.mean(dim=1)
-        return x if pre_logits else self.head(x)
+        return x if pre_logits else self.head(self.act_head(x))
 
     def forward(self, x):
         x = self.forward_features(x)
@@ -503,16 +398,16 @@ def _create_twins(variant, pretrained=False, **kwargs):
     if kwargs.get('features_only', None):
         raise RuntimeError('features_only not implemented for Vision Transformer models.')
 
-    model = build_model_with_cfg(Twins_Spike, variant, pretrained, **kwargs)
+    model = build_model_with_cfg(Twins, variant, pretrained, **kwargs)
     return model
 
 
 @register_model
-def twins_pcpvt_small_spike_q(pretrained=False, **kwargs):
+def twins_pcpvt_small_spike_mlp(pretrained=False, **kwargs):
     model_kwargs = dict(
         patch_size=4, embed_dims=[64, 128, 320, 512], num_heads=[1, 2, 5, 8], mlp_ratios=[8, 8, 4, 4],
         depths=[3, 4, 6, 3], sr_ratios=[8, 4, 2, 1], **kwargs)
-    return _create_twins('twins_pcpvt_small_spike', pretrained=pretrained, **model_kwargs)
+    return _create_twins('twins_pcpvt_small_spike_mlp', pretrained=pretrained, **model_kwargs)
 
 
 @register_model
